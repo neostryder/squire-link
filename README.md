@@ -52,3 +52,7 @@ go run build.go 1.0.0
 ```
 
 The binaries for Windows, macOS and Linux, on x64 and ARM, land in `dist/`.
+
+## License
+
+Squire Link uses the same dual license as Squire: the GNU General Public License version 2, or the Angband licence. See [LICENSE.md](LICENSE.md).
