@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -10,7 +11,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -37,13 +40,32 @@ type relay struct {
 	keys       secretStore
 	client     *http.Client
 	logger     *log.Logger
+	now        func() time.Time
+
+	// skipMu guards skip: the servers recently found busy or not answering,
+	// and until when to pass them over.
+	skipMu sync.Mutex
+	skip   map[string]skipped
 }
+
+type skipped struct {
+	until  time.Time
+	reason string
+}
+
+const (
+	busySkip     = 5 * time.Second
+	downSkip     = 30 * time.Second
+	probeTimeout = 600 * time.Millisecond
+)
 
 func newRelay(cfg config, configFile, mode string, keys secretStore, logger *log.Logger) *relay {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	return &relay{
 		cfg: cfg, configFile: configFile, mode: mode, keys: keys, logger: logger,
+		now:  time.Now,
+		skip: map[string]skipped{},
 		client: &http.Client{
 			Timeout:       30 * time.Second,
 			Transport:     transport,
@@ -131,8 +153,9 @@ func (h *relay) relayRequest(w http.ResponseWriter, r *http.Request, name string
 	start := time.Now()
 	status := http.StatusBadGateway
 	var size int64
+	answered := ""
 	defer func() {
-		h.logger.Printf("time=%s route=%s status=%d latency=%s bytes=%d", start.UTC().Format(time.RFC3339), name, status, time.Since(start).Round(time.Millisecond), size)
+		h.logger.Printf("time=%s route=%s status=%d latency=%s bytes=%d target=%s", start.UTC().Format(time.RFC3339), name, status, time.Since(start).Round(time.Millisecond), size, answered)
 	}()
 	if r.ContentLength > maxBodyBytes {
 		status = http.StatusRequestEntityTooLarge
@@ -152,24 +175,64 @@ func (h *relay) relayRequest(w http.ResponseWriter, r *http.Request, name string
 		}
 		return
 	}
-	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, selected.Target, bytes.NewReader(body))
-	if err != nil {
-		writeError(w, status, "invalid configured target")
-		return
-	}
-	upstream.Header.Set("Content-Type", "application/json")
+	secret := ""
 	if selected.Key != "" {
-		secret, err := h.keys.Get("squire-link", selected.Key)
+		var err error
+		secret, err = h.keys.Get("squire-link", selected.Key)
 		if err != nil {
 			status = http.StatusServiceUnavailable
 			writeError(w, status, "route key is unavailable in the OS keychain")
 			return
 		}
-		upstream.Header.Set("Authorization", "Bearer "+secret)
 	}
-	response, err := h.client.Do(upstream)
-	if err != nil {
-		writeError(w, status, "upstream request failed")
+	targets := append([]string{selected.Target}, selected.Fallbacks...)
+	pooled := len(targets) > 1
+	var response *http.Response
+	var passed []string
+	for _, target := range targets {
+		if pooled {
+			if reason, ok := h.skipping(target); ok {
+				passed = append(passed, target+" "+reason+" (recently)")
+				continue
+			}
+			if reason, wait := h.busy(r, target); reason != "" {
+				h.remember(target, reason, wait)
+				passed = append(passed, target+" "+reason)
+				continue
+			}
+		}
+		upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
+		if err != nil {
+			writeError(w, status, "invalid configured target")
+			return
+		}
+		upstream.Header.Set("Content-Type", "application/json")
+		if secret != "" {
+			upstream.Header.Set("Authorization", "Bearer "+secret)
+		}
+		got, err := h.client.Do(upstream)
+		if err != nil {
+			if !pooled {
+				writeError(w, status, "upstream request failed")
+				return
+			}
+			h.remember(target, "not answering", downSkip)
+			passed = append(passed, target+" not answering")
+			continue
+		}
+		// A server error is worth trying elsewhere. A refusal of the request
+		// itself (4xx) would be refused by another server too.
+		if pooled && got.StatusCode >= 500 {
+			got.Body.Close()
+			h.remember(target, fmt.Sprintf("error %d", got.StatusCode), busySkip)
+			passed = append(passed, fmt.Sprintf("%s error %d", target, got.StatusCode))
+			continue
+		}
+		response, answered = got, target
+		break
+	}
+	if response == nil {
+		writeError(w, status, "no server could take the request: "+strings.Join(passed, "; "))
 		return
 	}
 	defer response.Body.Close()
@@ -179,6 +242,64 @@ func (h *relay) relayRequest(w http.ResponseWriter, r *http.Request, name string
 	}
 	w.WriteHeader(status)
 	size, _ = io.Copy(w, response.Body)
+}
+
+func (h *relay) skipping(target string) (string, bool) {
+	h.skipMu.Lock()
+	defer h.skipMu.Unlock()
+	s, ok := h.skip[target]
+	if !ok || !h.now().Before(s.until) {
+		return "", false
+	}
+	return s.reason, true
+}
+
+func (h *relay) remember(target, reason string, wait time.Duration) {
+	h.skipMu.Lock()
+	defer h.skipMu.Unlock()
+	h.skip[target] = skipped{until: h.now().Add(wait), reason: reason}
+}
+
+// busy reads a Laya server's /load report to see whether it can take a
+// request. An empty reason means go ahead; a server with no load report is
+// taken as ready.
+func (h *relay) busy(r *http.Request, target string) (string, time.Duration) {
+	u, err := url.Parse(target)
+	if err != nil {
+		return "invalid address", downSkip
+	}
+	probe := url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/load"}
+	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, probe.String(), nil)
+	if err != nil {
+		return "invalid address", downSkip
+	}
+	response, err := h.client.Do(request)
+	if err != nil {
+		return "not answering", downSkip
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return "", 0
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Sprintf("load check answered %d", response.StatusCode), downSkip
+	}
+	var load struct {
+		Busy  bool  `json:"busy"`
+		Ready *bool `json:"ready"`
+	}
+	if json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&load) != nil {
+		return "", 0
+	}
+	if load.Busy {
+		return "busy", busySkip
+	}
+	if load.Ready != nil && !*load.Ready {
+		return "not ready", busySkip
+	}
+	return "", 0
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

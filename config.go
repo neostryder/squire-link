@@ -16,7 +16,10 @@ import (
 
 type route struct {
 	Target string `json:"target"`
-	Key    string `json:"key,omitempty"`
+	// Fallbacks are more addresses for the same kind of server, tried in order
+	// after Target when it is busy, not ready or not answering.
+	Fallbacks []string `json:"fallbacks,omitempty"`
+	Key       string   `json:"key,omitempty"`
 }
 
 type config struct {
@@ -100,9 +103,11 @@ func (cfg config) validate() error {
 		if r.Key != "" && (!namePattern.MatchString(r.Key) || r.Key == "link-token") {
 			return fmt.Errorf("invalid key name for route %q", name)
 		}
-		u, err := url.Parse(r.Target)
-		if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" {
-			return fmt.Errorf("invalid target for route %q: use an http or https URL without credentials, query, or fragment", name)
+		for _, target := range append([]string{r.Target}, r.Fallbacks...) {
+			u, err := url.Parse(target)
+			if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" {
+				return fmt.Errorf("invalid target for route %q: use an http or https URL without credentials, query, or fragment", name)
+			}
 		}
 	}
 	for _, origin := range cfg.Origins {

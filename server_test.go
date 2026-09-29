@@ -226,3 +226,87 @@ func TestLoopbackOnly(t *testing.T) {
 		}
 	}
 }
+
+// layaServer answers /load with the given report (or 404 when empty) and POSTs
+// with the given status, counting the POSTs it receives.
+func layaServer(t *testing.T, load string, status int, posts *int) *httptest.Server {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/load" {
+			if load == "" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(load))
+			return
+		}
+		*posts++
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"answers":{}}`))
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func postLaya(h *relay) *httptest.ResponseRecorder {
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/systemone/laya", strings.NewReader("{}")))
+	return response
+}
+
+func TestFallbackPassesOverABusyServer(t *testing.T) {
+	var firstPosts, secondPosts int
+	first := layaServer(t, `{"busy":true,"ready":true}`, http.StatusOK, &firstPosts)
+	second := layaServer(t, `{"busy":false,"ready":true}`, http.StatusOK, &secondPosts)
+	var logs bytes.Buffer
+	h := testRelay(config{Routes: map[string]route{"laya": {Target: first.URL + "/v1/systemone", Fallbacks: []string{second.URL + "/v1/systemone"}}}}, "local", &logs)
+	if response := postLaya(h); response.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", response.Code, response.Body.String())
+	}
+	if firstPosts != 0 || secondPosts != 1 {
+		t.Fatalf("posts: first=%d second=%d", firstPosts, secondPosts)
+	}
+	if !strings.Contains(logs.String(), "target="+second.URL) {
+		t.Fatalf("log does not name the server that answered: %s", logs.String())
+	}
+}
+
+func TestFallbackMovesOnFromAServerErrorAndRemembersIt(t *testing.T) {
+	var firstPosts, secondPosts int
+	first := layaServer(t, "", http.StatusServiceUnavailable, &firstPosts)
+	second := layaServer(t, "", http.StatusOK, &secondPosts)
+	h := testRelay(config{Routes: map[string]route{"laya": {Target: first.URL + "/v1/systemone", Fallbacks: []string{second.URL + "/v1/systemone"}}}}, "local", new(bytes.Buffer))
+	for i := 0; i < 2; i++ {
+		if response := postLaya(h); response.Code != http.StatusOK {
+			t.Fatalf("request %d status %d", i, response.Code)
+		}
+	}
+	if firstPosts != 1 || secondPosts != 2 {
+		t.Fatalf("posts: first=%d second=%d; the busy server should be skipped the second time", firstPosts, secondPosts)
+	}
+}
+
+func TestFallbackNeverRetriesARefusedRequest(t *testing.T) {
+	var firstPosts, secondPosts int
+	first := layaServer(t, "", http.StatusBadRequest, &firstPosts)
+	second := layaServer(t, "", http.StatusOK, &secondPosts)
+	h := testRelay(config{Routes: map[string]route{"laya": {Target: first.URL + "/v1/systemone", Fallbacks: []string{second.URL + "/v1/systemone"}}}}, "local", new(bytes.Buffer))
+	if response := postLaya(h); response.Code != http.StatusBadRequest || secondPosts != 0 {
+		t.Fatalf("status %d, second posts %d", response.Code, secondPosts)
+	}
+}
+
+func TestFallbackNamesEveryServerWhenNoneAnswers(t *testing.T) {
+	h := testRelay(config{Routes: map[string]route{"laya": {Target: "http://127.0.0.1:1/v1/systemone", Fallbacks: []string{"http://127.0.0.1:2/v1/systemone"}}}}, "local", new(bytes.Buffer))
+	response := postLaya(h)
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "127.0.0.1:1") || !strings.Contains(response.Body.String(), "127.0.0.1:2") {
+		t.Fatalf("status %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigRejectsABadFallback(t *testing.T) {
+	cfg := config{Routes: map[string]route{"laya": {Target: "http://localhost:8010/v1/systemone", Fallbacks: []string{"ftp://nope"}}}}
+	if cfg.validate() == nil {
+		t.Fatal("a non-http fallback was accepted")
+	}
+}
