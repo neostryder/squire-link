@@ -10,6 +10,8 @@ Download the release asset that matches your operating system and processor from
 
 On Windows, open PowerShell in the download folder and run `./squire-link-windows-amd64.exe`. Use the `arm64.exe` file on Windows ARM. On macOS, open Terminal in the download folder, run `chmod +x ./squire-link-darwin-arm64`, then run `./squire-link-darwin-arm64`; use `darwin-amd64` on an Intel Mac. On Linux, make the matching `linux-amd64` or `linux-arm64` file executable with `chmod +x`, then run it with `./` and its file name.
 
+On Arch Linux, download `packaging/arch/PKGBUILD` from this repository into an empty folder and run `makepkg -si` there. It fetches the release binary for your processor, checks it, and installs it as `squire-link`, so you can run it from any terminal.
+
 Run `squire-link --version` to print the embedded version. Starting `squire-link` prints the config file path and listening address. Keep its terminal open while playing. By default it listens at `127.0.0.1:8765`. In Squire's Setup tab, choose "Another server" and enter `http://127.0.0.1:8765/v1/systemone/jev` for Jev or `http://127.0.0.1:8765/v1/systemone/laya` for Laya. Enter `http://127.0.0.1:8765/v1/orders` as the channel address when using chat orders.
 
 Squire Link is a separate program. Squire does not start it automatically. Start Squire Link before opening or using the browser game, then configure the model and channel addresses in Squire's Setup tab.
@@ -74,7 +76,7 @@ For Discord, check the bot token, channel ID, Message Content intent, and channe
 
 ## Building from source
 
-Install Go 1.26 or later, then run `go vet ./...`, `go test ./...`, and `go run build.go 1.0.0`. The build writes six standalone files to `dist/`: Windows amd64 and arm64, macOS darwin amd64 and arm64, and Linux amd64 and arm64. Windows files end in `.exe`; other file names end in the OS and architecture. The supplied version is embedded in each build and printed by `--version`.
+Install Go 1.26 or later, then run `go vet ./...`, `go test ./...`, and `go run build.go 1.0.0`. The build writes six standalone files to `dist/`: Windows amd64 and arm64, macOS darwin amd64 and arm64, and Linux amd64 and arm64. Windows files end in `.exe`; other file names end in the OS and architecture. The supplied version is embedded in each build and printed by `--version`. The build also writes `dist/SHA256SUMS`, and the same source and version always give the same checksums.
 
 ## License
 

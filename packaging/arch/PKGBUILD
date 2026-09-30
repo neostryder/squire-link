@@ -1,0 +1,21 @@
+# Maintainer: neostryder <61663569+neostryder@users.noreply.github.com>
+
+pkgname=squire-link-bin
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Local proxy that lets the Squire autoplayer in a browser reach Jev, a Laya server, and Twitch or Discord chat"
+arch=('x86_64' 'aarch64')
+url='https://github.com/neostryder/squire-link'
+license=('GPL-3.0-only')
+provides=('squire-link')
+conflicts=('squire-link')
+options=('!strip' '!debug')
+
+source_x86_64=("${pkgname}-${pkgver}-x86_64::${url}/releases/download/v${pkgver}/squire-link-linux-amd64")
+source_aarch64=("${pkgname}-${pkgver}-aarch64::${url}/releases/download/v${pkgver}/squire-link-linux-arm64")
+sha256sums_x86_64=('f2766f03c84b7ee4e5a5129c0f92dcdfe7b3b622ada36397a6962eb8546e5922')
+sha256sums_aarch64=('662b7f18a762dc066b520fc6892fd6bc5c7a594a891d1a3c300c35583b78d58d')
+
+package() {
+  install -Dm755 "${srcdir}/${pkgname}-${pkgver}-${CARCH}" "${pkgdir}/usr/bin/squire-link"
+}
