@@ -36,7 +36,7 @@ func usage(out io.Writer) {
 	fmt.Fprintln(out, "Usage: squire-link [run] [--mode local|serve] [--listen 127.0.0.1:8765] [--config PATH]")
 	fmt.Fprintln(out, "       squire-link routes [--config PATH]")
 	fmt.Fprintln(out, "       squire-link key set NAME | delete NAME | list [--config PATH]")
-	fmt.Fprintln(out, "       squire-link token | version | --help")
+	fmt.Fprintln(out, "       squire-link token | version | --version | --help")
 }
 
 func flags(name string) *flag.FlagSet {
@@ -46,6 +46,13 @@ func flags(name string) *flag.FlagSet {
 }
 
 func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer, keys secretStore) error {
+	if len(args) > 0 && args[0] == "--version" {
+		if len(args) != 1 {
+			return errors.New("--version takes no arguments")
+		}
+		fmt.Fprintln(stdout, version)
+		return nil
+	}
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
 		usage(stdout)
 		return nil
