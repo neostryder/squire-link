@@ -89,10 +89,15 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer, keys secre
 		}
 		defer listener.Close()
 		fmt.Fprintf(stdout, "Config: %s\nMode: %s\nListening: %s\n", path, *mode, listener.Addr())
+		logger := log.New(stderr, "", 0)
+		handler := newRelay(cfg, path, *mode, keys, logger)
 		server := &http.Server{
-			Handler:           newRelay(cfg, path, *mode, keys, log.New(stderr, "", 0)),
+			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
 		}
+		readers, stopReaders := context.WithCancel(context.Background())
+		defer stopReaders()
+		startChannel(readers, cfg.Channel, keys, handler.orders, logger)
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 		defer signal.Stop(stop)
@@ -235,8 +240,14 @@ func keyCommand(args []string, stdin io.Reader, stdout, stderr io.Writer, keys s
 			return err
 		}
 		seen := make(map[string]bool)
+		keyNames := []string{}
 		for _, name := range routeNames(cfg.Routes) {
-			keyName := cfg.Routes[name].Key
+			keyNames = append(keyNames, cfg.Routes[name].Key)
+		}
+		if cfg.Channel.Discord.Enabled {
+			keyNames = append(keyNames, discordKey)
+		}
+		for _, keyName := range keyNames {
 			if keyName == "" || seen[keyName] {
 				continue
 			}

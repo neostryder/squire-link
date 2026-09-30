@@ -25,9 +25,37 @@ type route struct {
 type config struct {
 	Routes  map[string]route `json:"routes"`
 	Origins []string         `json:"origins"`
+	Channel channelConfig    `json:"channel"`
 }
 
-var namePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+// channelConfig says where viewers' orders come from and which ones are taken.
+type channelConfig struct {
+	Prefix          string   `json:"prefix"`
+	CooldownSeconds int      `json:"cooldownSeconds"`
+	Allow           []string `json:"allow"`
+	Block           []string `json:"block"`
+	Twitch          struct {
+		Enabled bool   `json:"enabled"`
+		Channel string `json:"channel"`
+	} `json:"twitch"`
+	Discord struct {
+		Enabled   bool   `json:"enabled"`
+		ChannelID string `json:"channelId"`
+	} `json:"discord"`
+}
+
+// discordKey is the keychain entry that holds the Discord bot token.
+const discordKey = "discord"
+
+var (
+	namePattern          = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	twitchChannelPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,25}$`)
+	snowflakePattern     = regexp.MustCompile(`^[0-9]{5,25}$`)
+)
+
+func defaultChannelConfig() channelConfig {
+	return channelConfig{Prefix: "!squire", CooldownSeconds: 60, Allow: []string{}, Block: []string{}}
+}
 
 func defaultConfig() config {
 	return config{
@@ -36,6 +64,7 @@ func defaultConfig() config {
 			"laya": {Target: "http://localhost:8010/v1/systemone"},
 		},
 		Origins: []string{"https://angband.rpgm.world", "https://*.itch.zone", "http://localhost:*", "http://127.0.0.1:*"},
+		Channel: defaultChannelConfig(),
 	}
 }
 
@@ -79,7 +108,9 @@ func loadConfig(path string) (config, error) {
 	if err != nil {
 		return config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
-	var cfg config
+	// A config file written before the channel section existed reads with the
+	// channel defaults, which leave both platforms off.
+	cfg := config{Channel: defaultChannelConfig()}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
@@ -114,6 +145,22 @@ func (cfg config) validate() error {
 		if _, err := parseOriginPattern(origin); err != nil {
 			return fmt.Errorf("invalid origin %q: %w", origin, err)
 		}
+	}
+	return cfg.Channel.validate()
+}
+
+func (c channelConfig) validate() error {
+	if strings.TrimSpace(c.Prefix) == "" || strings.ContainsAny(c.Prefix, " \t\r\n") {
+		return errors.New("channel prefix must be a word such as !squire, with no spaces")
+	}
+	if c.CooldownSeconds < 0 || c.CooldownSeconds > 86400 {
+		return errors.New("channel cooldownSeconds must be between 0 and 86400")
+	}
+	if c.Twitch.Enabled && !twitchChannelPattern.MatchString(strings.TrimPrefix(c.Twitch.Channel, "#")) {
+		return errors.New("channel twitch.channel must be a Twitch channel name, such as the streamer's login name")
+	}
+	if c.Discord.Enabled && !snowflakePattern.MatchString(c.Discord.ChannelID) {
+		return errors.New("channel discord.channelId must be the channel's numeric ID")
 	}
 	return nil
 }

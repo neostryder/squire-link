@@ -32,7 +32,15 @@ The first run creates this file in your user config folder (`squire-link routes`
     "jev": { "target": "https://api.typesafe.ai/v1/systemone", "key": "jev" },
     "laya": { "target": "http://localhost:8010/v1/systemone" }
   },
-  "origins": ["https://angband.rpgm.world", "https://*.itch.zone", "http://localhost:*", "http://127.0.0.1:*"]
+  "origins": ["https://angband.rpgm.world", "https://*.itch.zone", "http://localhost:*", "http://127.0.0.1:*"],
+  "channel": {
+    "prefix": "!squire",
+    "cooldownSeconds": 60,
+    "allow": [],
+    "block": [],
+    "twitch": { "enabled": false, "channel": "" },
+    "discord": { "enabled": false, "channelId": "" }
+  }
 }
 ```
 
@@ -43,6 +51,17 @@ If you run Laya on more than one computer, add the others as `fallbacks`, for ex
 `origins` lists the web pages allowed to use Squire Link. `*.` at the start of a host matches any subdomain, and `:*` matches any port. A page that isn't listed gets an error naming the config file, so if you play from somewhere else, add its address here.
 
 Squire Link forwards only to the servers in this file, never to an address a page asks for.
+
+## Orders from chat
+
+Viewers of your stream can give the squire orders from Twitch chat or a Discord channel. Both are off until you turn them on in the `channel` section of the config file, and a config file from an older Squire Link reads as if the section were there with both off.
+
+A chat message becomes an order only when it starts with the prefix, `!squire` unless you change `prefix`, for example `!squire run from uniques`. The prefix is removed and the rest is kept, up to 300 characters. Each viewer can give one order every `cooldownSeconds` (60 unless you change it; 0 turns the wait off). Names in `block` are never taken. When `allow` lists any names, only those viewers are taken. Names are matched without regard to case: the Twitch login name, or the Discord user name.
+
+- **Twitch.** Set `"twitch": { "enabled": true, "channel": "yourname" }`. Squire Link reads the channel's chat anonymously and can't write to it, so it needs no token.
+- **Discord.** Create a bot in the Discord developer portal, turn on its Message Content intent, and invite it to your server with the View Channel and Read Message History permissions on the channel. Store its token with `squire-link key set discord`, then set `"discord": { "enabled": true, "channelId": "123456789012345678" }`, using the channel's ID (turn on Developer Mode in Discord, then right-click the channel and choose Copy Channel ID). Squire Link checks the channel for new messages every 5 seconds and skips messages from bots. Messages written before it started are not taken.
+
+Squire Link keeps the orders until Squire collects them from `http://127.0.0.1:8765/v1/orders`, the address to enter as the channel address in Squire's Setup tab. Each read returns the waiting orders and clears them. It keeps at most the latest 100. The log shows who gave each order, but not its words.
 
 ## Building from source
 

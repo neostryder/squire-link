@@ -41,6 +41,7 @@ type relay struct {
 	client     *http.Client
 	logger     *log.Logger
 	now        func() time.Time
+	orders     *orderQueue
 
 	// skipMu guards skip: the servers recently found busy or not answering,
 	// and until when to pass them over.
@@ -64,8 +65,9 @@ func newRelay(cfg config, configFile, mode string, keys secretStore, logger *log
 	transport.Proxy = nil
 	return &relay{
 		cfg: cfg, configFile: configFile, mode: mode, keys: keys, logger: logger,
-		now:  time.Now,
-		skip: map[string]skipped{},
+		now:    time.Now,
+		orders: newOrderQueue(cfg.Channel, time.Now, logger),
+		skip:   map[string]skipped{},
 		client: &http.Client{
 			Timeout:       30 * time.Second,
 			Transport:     transport,
@@ -112,6 +114,20 @@ func (h *relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Routes  []string `json:"routes"`
 			Version string   `json:"version"`
 		}{true, h.mode, routeNames(h.cfg.Routes), version})
+		return
+	}
+	if r.URL.Path == "/v1/orders" {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "GET required")
+			return
+		}
+		if h.mode == "serve" && !h.validToken(r.Header.Get("X-Squire-Link-Token")) {
+			writeError(w, http.StatusForbidden, "serve mode requires a valid X-Squire-Link-Token")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(h.orders.drain())
 		return
 	}
 	const prefix = "/v1/systemone/"
