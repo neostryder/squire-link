@@ -127,7 +127,11 @@ func (h *relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(h.orders.drain())
+		orders, more := h.orders.drain(orderPageSize)
+		_ = json.NewEncoder(w).Encode(struct {
+			Orders []chatOrder `json:"orders"`
+			More   bool        `json:"more"`
+		}{orders, more})
 		return
 	}
 	const prefix = "/v1/systemone/"

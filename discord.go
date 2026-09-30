@@ -98,24 +98,83 @@ func (d *discordReader) run(ctx context.Context) {
 // the newest message, so orders written before Squire Link started are not
 // replayed. A rate limit comes back as how long to wait.
 func (d *discordReader) poll(ctx context.Context) (time.Duration, error) {
-	address := d.base + "/channels/" + d.channelID + "/messages?limit=100"
+	query := "limit=100&after=" + d.after
 	if d.after == "" {
-		address = d.base + "/channels/" + d.channelID + "/messages?limit=1"
-	} else {
-		address += "&after=" + d.after
+		query = "limit=1"
 	}
+	messages, wait, limited, err := d.pollPage(ctx, query)
+	if err != nil || limited {
+		return wait, err
+	}
+	if d.after == "" {
+		d.after = "0"
+		if len(messages) > 0 {
+			d.after = messages[0].ID
+		}
+		return wait, nil
+	}
+	cursor := d.after
+	pages := [][]discordMessage{messages}
+	for len(messages) == 100 {
+		sort.Slice(messages, func(i, j int) bool { return snowflakeLess(messages[i].ID, messages[j].ID) })
+		if !snowflakeLess(cursor, messages[0].ID) {
+			break
+		}
+		if wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return 0, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		messages, wait, limited, err = d.pollPage(ctx, "limit=100&before="+messages[0].ID)
+		if err != nil || limited {
+			return wait, err
+		}
+		pages = append(pages, messages)
+	}
+	for i := len(pages) - 1; i >= 0; i-- {
+		messages = pages[i]
+		sort.Slice(messages, func(a, b int) bool { return snowflakeLess(messages[a].ID, messages[b].ID) })
+		for _, m := range messages {
+			if !snowflakeLess(d.after, m.ID) {
+				continue
+			}
+			if !m.Author.Bot {
+				if m.Content == "" && !d.warnedNoText {
+					d.warnedNoText = true
+					d.logger.Printf("discord: a message came with no text. Turn on the Message Content intent for the bot in the Discord developer portal.")
+				}
+				d.take(m.Author.Username, m.Content)
+			}
+			d.after = m.ID
+		}
+	}
+	return wait, nil
+}
+
+func (d *discordReader) pollPage(ctx context.Context, query string) ([]discordMessage, time.Duration, bool, error) {
+	address := d.base + "/channels/" + d.channelID + "/messages?" + query
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 	if err != nil {
-		return 0, errStop{"the channel address is invalid"}
+		return nil, 0, false, errStop{"the channel address is invalid"}
 	}
 	request.Header.Set("Authorization", "Bot "+d.token)
 	request.Header.Set("User-Agent", "DiscordBot (https://github.com/neostryder/squire-link, "+version+")")
 	response, err := d.client.Do(request)
 	if err != nil {
-		return 0, errors.New("Discord did not answer")
+		return nil, 0, false, errors.New("Discord did not answer")
 	}
 	defer response.Body.Close()
 	body := io.LimitReader(response.Body, 4<<20)
+	var wait time.Duration
+	if response.Header.Get("X-RateLimit-Remaining") == "0" {
+		if reset, err := strconv.ParseFloat(response.Header.Get("X-RateLimit-Reset-After"), 64); err == nil {
+			wait = max(wait, time.Duration(reset*float64(time.Second)))
+		}
+	}
 	switch response.StatusCode {
 	case http.StatusOK:
 	case http.StatusTooManyRequests:
@@ -123,46 +182,25 @@ func (d *discordReader) poll(ctx context.Context) (time.Duration, error) {
 			RetryAfter float64 `json:"retry_after"`
 		}
 		_ = json.NewDecoder(body).Decode(&limit)
-		wait := time.Duration(limit.RetryAfter * float64(time.Second))
+		wait = max(wait, time.Duration(limit.RetryAfter*float64(time.Second)))
 		if header, err := strconv.ParseFloat(response.Header.Get("Retry-After"), 64); err == nil && time.Duration(header*float64(time.Second)) > wait {
 			wait = time.Duration(header * float64(time.Second))
 		}
-		return max(wait, time.Second), nil
+		return nil, max(wait, time.Second), true, nil
 	case http.StatusUnauthorized:
-		return 0, errStop{"Discord refused the bot token (401). Store the right one with: squire-link key set discord"}
+		return nil, 0, false, errStop{"Discord refused the bot token (401). Store the right one with: squire-link key set discord"}
 	case http.StatusForbidden:
-		return 0, errStop{"Discord says the bot cannot read channel " + d.channelID + " (403). Give the bot the View Channel and Read Message History permissions there"}
+		return nil, 0, false, errStop{"Discord says the bot cannot read channel " + d.channelID + " (403). Give the bot the View Channel and Read Message History permissions there"}
 	case http.StatusNotFound:
-		return 0, errStop{"Discord has no channel " + d.channelID + " that the bot can see (404)"}
+		return nil, 0, false, errStop{"Discord has no channel " + d.channelID + " that the bot can see (404)"}
 	default:
-		return 0, fmt.Errorf("Discord answered %d", response.StatusCode)
+		return nil, 0, false, fmt.Errorf("Discord answered %d", response.StatusCode)
 	}
 	var messages []discordMessage
 	if err := json.NewDecoder(body).Decode(&messages); err != nil {
-		return 0, errors.New("Discord sent messages Squire Link cannot read")
+		return nil, 0, false, errors.New("Discord sent messages Squire Link cannot read")
 	}
-	sort.Slice(messages, func(i, j int) bool { return snowflakeLess(messages[i].ID, messages[j].ID) })
-	if d.after == "" {
-		d.after = "0"
-		if len(messages) > 0 {
-			d.after = messages[len(messages)-1].ID
-		}
-		return 0, nil
-	}
-	for _, m := range messages {
-		if snowflakeLess(d.after, m.ID) {
-			d.after = m.ID
-		}
-		if m.Author.Bot {
-			continue
-		}
-		if m.Content == "" && !d.warnedNoText {
-			d.warnedNoText = true
-			d.logger.Printf("discord: a message came with no text. Turn on the Message Content intent for the bot in the Discord developer portal.")
-		}
-		d.take(m.Author.Username, m.Content)
-	}
-	return 0, nil
+	return messages, wait, false, nil
 }
 
 func snowflakeLess(a, b string) bool {

@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -61,8 +63,56 @@ func TestOrderCap(t *testing.T) {
 		clk.t = clk.t.Add(time.Second)
 		q.take("twitch", "grip", "!squire order "+string(rune('a'+i%26)))
 	}
-	if n := len(q.drain()); n != maxQueued {
+	orders, _ := q.drain(maxQueued)
+	if n := len(orders); n != maxQueued {
 		t.Fatalf("queue held %d orders, want %d", n, maxQueued)
+	}
+}
+
+func TestOrdersEndpointPagesAndLogsDrops(t *testing.T) {
+	var logs bytes.Buffer
+	h := testRelay(defaultConfig(), "local", &logs)
+	h.orders.cooldown = 0
+	for i := 0; i < maxQueued+5; i++ {
+		h.orders.take("twitch", "grip", fmt.Sprintf("!squire order %d", i))
+	}
+	for page, wantCount := range []int{50, 50, 0} {
+		response := getOrders(h, "")
+		var got struct {
+			Orders []chatOrder `json:"orders"`
+			More   bool        `json:"more"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != http.StatusOK || len(got.Orders) != wantCount || got.More != (page == 0) {
+			t.Fatalf("page %d: status=%d body=%s", page, response.Code, response.Body.String())
+		}
+		for i, order := range got.Orders {
+			if want := fmt.Sprintf("order %d", 5+page*50+i); order.Text != want {
+				t.Fatalf("page %d order %d: %q, want %q", page, i, order.Text, want)
+			}
+		}
+	}
+	if !strings.Contains(logs.String(), "dropped=5") {
+		t.Fatalf("missing drop count: %s", logs.String())
+	}
+}
+
+func TestCooldownEntriesExpireAndStayBounded(t *testing.T) {
+	q, clk := testQueue(channelConfig{Prefix: "!squire", CooldownSeconds: 60})
+	for i := 0; i < maxCooldownEntries+20; i++ {
+		if !q.take("twitch", fmt.Sprintf("user%d", i), "!squire rest") {
+			t.Fatal("distinct viewer refused")
+		}
+	}
+	if len(q.last) > maxCooldownEntries {
+		t.Fatalf("cooldown entries: %d", len(q.last))
+	}
+	clk.t = clk.t.Add(60 * time.Second)
+	q.take("twitch", "new", "!squire rest")
+	if len(q.last) != 1 {
+		t.Fatalf("expired cooldown entries remain: %d", len(q.last))
 	}
 }
 
@@ -105,7 +155,7 @@ func TestCooldown(t *testing.T) {
 	if !q.take("twitch", "grip", "!squire fight") {
 		t.Fatal("an order after the cooldown was refused")
 	}
-	got := q.drain()
+	got, _ := q.drain(maxQueued)
 	if len(got) != 4 || got[0].Text != "run" || got[0].User != "Grip" || got[0].Platform != "twitch" || !got[0].At.Equal(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)) {
 		t.Fatalf("queued: %+v", got)
 	}
@@ -129,18 +179,21 @@ func TestOrdersEndpointReturnsAndClears(t *testing.T) {
 	if response.Code != http.StatusOK || response.Header().Get("Access-Control-Allow-Origin") != "https://angband.rpgm.world" || response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("status %d headers %v", response.Code, response.Header())
 	}
-	var got []map[string]any
+	var got struct {
+		Orders []map[string]any `json:"orders"`
+		More   bool             `json:"more"`
+	}
 	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0]["text"] != "run from uniques" || got[0]["platform"] != "twitch" || got[0]["user"] != "Grip" || got[1]["user"] != "fang" {
+	if len(got.Orders) != 2 || got.More || got.Orders[0]["text"] != "run from uniques" || got.Orders[0]["platform"] != "twitch" || got.Orders[0]["user"] != "Grip" || got.Orders[1]["user"] != "fang" {
 		t.Fatalf("orders: %s", response.Body.String())
 	}
-	if _, err := time.Parse(time.RFC3339, got[0]["at"].(string)); err != nil {
-		t.Fatalf("at is not a timestamp: %v", got[0]["at"])
+	if _, err := time.Parse(time.RFC3339, got.Orders[0]["at"].(string)); err != nil {
+		t.Fatalf("at is not a timestamp: %v", got.Orders[0]["at"])
 	}
 	response = getOrders(h, "")
-	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "[]" {
+	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != `{"orders":[],"more":false}` {
 		t.Fatalf("second read: %d %s", response.Code, response.Body.String())
 	}
 }
@@ -152,7 +205,8 @@ func TestOrdersEndpointOriginRules(t *testing.T) {
 	if response.Code != http.StatusForbidden || response.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("bad origin: %d", response.Code)
 	}
-	if len(h.orders.drain()) != 1 {
+	orders, _ := h.orders.drain(maxQueued)
+	if len(orders) != 1 {
 		t.Fatal("a refused page emptied the queue")
 	}
 	response = httptest.NewRecorder()
@@ -356,7 +410,7 @@ func TestDiscordReaderAgainstAFakeServer(t *testing.T) {
 			_, _ = w.Write([]byte(`[
 				{"id":"1003","content":"!squire from a bot","author":{"username":"helper","bot":true}},
 				{"id":"1002","content":"!squire keep two flasks","author":{"username":"fang"}},
-				{"id":"999","content":"!squire run from uniques","author":{"username":"Grip"}}
+				{"id":"1001","content":"!squire run from uniques","author":{"username":"Grip"}}
 			]`))
 		default:
 			_, _ = w.Write([]byte(`[]`))
@@ -376,6 +430,81 @@ func TestDiscordReaderAgainstAFakeServer(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "bot-token-secret") {
 		t.Fatal("token leaked in log")
+	}
+}
+
+func TestDiscordReaderCatchesUpAcrossPages(t *testing.T) {
+	var queries []string
+	reader, _, got := fakeDiscord(t, func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		if r.URL.Query().Get("after") == "" && r.URL.Query().Get("before") == "" {
+			_, _ = w.Write([]byte(`[{"id":"1000","content":"old","author":{"username":"old"}}]`))
+			return
+		}
+		before := 1206
+		if raw := r.URL.Query().Get("before"); raw != "" {
+			before, _ = strconv.Atoi(raw)
+		}
+		var messages []discordMessage
+		for id := before - 1; id > 1000 && len(messages) < 100; id-- {
+			var m discordMessage
+			m.ID = strconv.Itoa(id)
+			m.Content = "!squire order " + m.ID
+			m.Author.Username = "grip"
+			messages = append(messages, m)
+		}
+		_ = json.NewEncoder(w).Encode(messages)
+	})
+	if _, err := reader.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 4 || queries[1] != "limit=100&after=1000" || queries[2] != "limit=100&before=1106" || queries[3] != "limit=100&before=1006" {
+		t.Fatalf("queries: %v", queries)
+	}
+	if len(*got) != 205 || (*got)[0].text != "!squire order 1001" || (*got)[204].text != "!squire order 1205" || reader.after != "1205" {
+		t.Fatalf("read %d messages, cursor %s", len(*got), reader.after)
+	}
+}
+
+func TestDiscordReaderWaitsForRateLimitBeforeNextPage(t *testing.T) {
+	var queries []string
+	reader, _, got := fakeDiscord(t, func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		switch len(queries) {
+		case 1:
+			_, _ = w.Write([]byte(`[{"id":"1000"}]`))
+		case 2, 4:
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset-After", "0.01")
+			var messages []discordMessage
+			for id := 1101; id > 1001; id-- {
+				messages = append(messages, discordMessage{ID: strconv.Itoa(id)})
+			}
+			_ = json.NewEncoder(w).Encode(messages)
+		case 3:
+			w.Header().Set("Retry-After", "0.02")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"retry_after":0.01}`))
+		default:
+			_, _ = w.Write([]byte(`[{"id":"1001","content":"!squire first","author":{"username":"grip"}}]`))
+		}
+	})
+	if _, err := reader.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	wait, err := reader.poll(context.Background())
+	if err != nil || wait < 20*time.Millisecond || time.Since(start) < 8*time.Millisecond || reader.after != "1000" || len(*got) != 0 {
+		t.Fatalf("rate limited: wait=%s err=%v cursor=%s taken=%d requests=%v", wait, err, reader.after, len(*got), queries)
+	}
+	if _, err := reader.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(*got) != 101 || reader.after != "1101" || len(queries) != 5 {
+		t.Fatalf("retry: messages=%d cursor=%s", len(*got), reader.after)
 	}
 }
 

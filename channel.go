@@ -15,7 +15,9 @@ const (
 	maxOrderRunes = 300
 	// maxQueued bounds the queue while nothing polls it, so a busy chat with
 	// no game running does not grow it without end. The oldest order goes first.
-	maxQueued = 100
+	maxQueued          = 100
+	maxCooldownEntries = 4096
+	orderPageSize      = 50
 )
 
 type chatOrder struct {
@@ -34,9 +36,10 @@ type orderQueue struct {
 	now      func() time.Time
 	logger   *log.Logger
 
-	mu    sync.Mutex
-	items []chatOrder
-	last  map[string]time.Time
+	mu      sync.Mutex
+	items   []chatOrder
+	last    map[string]time.Time
+	dropped int
 }
 
 // startChannel starts a reader for each platform the config turns on.
@@ -124,10 +127,31 @@ func (q *orderQueue) take(platform, user, message string) bool {
 	if at, seen := q.last[who]; seen && now.Sub(at) < q.cooldown {
 		return false
 	}
-	q.last[who] = now
+	if q.cooldown > 0 {
+		for key, at := range q.last {
+			if now.Sub(at) >= q.cooldown {
+				delete(q.last, key)
+			}
+		}
+		if len(q.last) >= maxCooldownEntries {
+			oldest := ""
+			for key, at := range q.last {
+				if oldest == "" || at.Before(q.last[oldest]) {
+					oldest = key
+				}
+			}
+			delete(q.last, oldest)
+		}
+		q.last[who] = now
+	}
 	q.items = append(q.items, chatOrder{Text: text, Platform: platform, User: strings.TrimSpace(user), At: now.UTC()})
 	if len(q.items) > maxQueued {
-		q.items = q.items[len(q.items)-maxQueued:]
+		q.items[0] = chatOrder{}
+		q.items = q.items[1:]
+		q.dropped++
+		if q.logger != nil {
+			q.logger.Printf("time=%s orders dropped=%d", now.UTC().Format(time.RFC3339), q.dropped)
+		}
 	}
 	if q.logger != nil {
 		q.logger.Printf("time=%s order platform=%s user=%s chars=%d", now.UTC().Format(time.RFC3339), platform, name, utf8.RuneCountInString(text))
@@ -135,14 +159,14 @@ func (q *orderQueue) take(platform, user, message string) bool {
 	return true
 }
 
-// drain returns every queued order, oldest first, and empties the queue.
-func (q *orderQueue) drain() []chatOrder {
+// drain returns one page of orders, oldest first, and leaves the rest queued.
+func (q *orderQueue) drain(limit int) ([]chatOrder, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	out := q.items
-	q.items = nil
-	if out == nil {
-		out = []chatOrder{}
-	}
-	return out
+	n := min(limit, len(q.items))
+	out := make([]chatOrder, n)
+	copy(out, q.items[:n])
+	clear(q.items[:n])
+	q.items = q.items[n:]
+	return out, len(q.items) > 0
 }

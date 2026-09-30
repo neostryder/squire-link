@@ -61,7 +61,7 @@ A chat message becomes an order only when it starts with the prefix, `!squire` u
 - **Twitch.** Set `"twitch": { "enabled": true, "channel": "yourname" }`. Squire Link reads the channel's chat anonymously and can't write to it, so it needs no token.
 - **Discord.** Create a bot in the Discord developer portal, turn on its Message Content intent, and invite it to your server with the View Channel and Read Message History permissions on the channel. Store its token with `squire-link key set discord`, then set `"discord": { "enabled": true, "channelId": "123456789012345678" }`, using the channel's ID (turn on Developer Mode in Discord, then right-click the channel and choose Copy Channel ID). Squire Link checks the channel for new messages every 5 seconds and skips messages from bots. Messages written before it started are not taken.
 
-Squire Link keeps the orders until Squire collects them from `http://127.0.0.1:8765/v1/orders`, the address to enter as the channel address in Squire's Setup tab. Each read returns the waiting orders and clears them. It keeps at most the latest 100. The log shows who gave each order, but not its words.
+Squire Link keeps the orders until Squire collects them from `http://127.0.0.1:8765/v1/orders`, the address to enter as the channel address in Squire's Setup tab. Each read returns up to 50 orders, oldest first, as `{"orders":[...],"more":true}` (or `false` when none remain), and removes only the orders returned. Squire keeps reading while `more` is true. Squire Link keeps at most the latest 100 waiting orders; when the queue is full, it drops the oldest and logs the running drop count. The log shows who gave each order, but not its words.
 
 ## Building from source
 
