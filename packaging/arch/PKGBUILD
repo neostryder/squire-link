@@ -11,11 +11,13 @@ provides=('squire-link')
 conflicts=('squire-link')
 options=('!strip' '!debug')
 
-source_x86_64=("${pkgname}-${pkgver}-x86_64::${url}/releases/download/v${pkgver}/squire-link-linux-amd64")
-source_aarch64=("${pkgname}-${pkgver}-aarch64::${url}/releases/download/v${pkgver}/squire-link-linux-arm64")
+source_x86_64=("${pkgname}-${pkgver}-amd64::${url}/releases/download/v${pkgver}/squire-link-linux-amd64")
+source_aarch64=("${pkgname}-${pkgver}-arm64::${url}/releases/download/v${pkgver}/squire-link-linux-arm64")
 sha256sums_x86_64=('f2766f03c84b7ee4e5a5129c0f92dcdfe7b3b622ada36397a6962eb8546e5922')
 sha256sums_aarch64=('662b7f18a762dc066b520fc6892fd6bc5c7a594a891d1a3c300c35583b78d58d')
 
 package() {
-  install -Dm755 "${srcdir}/${pkgname}-${pkgver}-${CARCH}" "${pkgdir}/usr/bin/squire-link"
+  local _goarch=amd64
+  [[ ${CARCH} == aarch64 ]] && _goarch=arm64
+  install -Dm755 "${srcdir}/${pkgname}-${pkgver}-${_goarch}" "${pkgdir}/usr/bin/squire-link"
 }
