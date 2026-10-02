@@ -6,6 +6,8 @@ Each entry opens with `[Visible]` for a change someone running Squire Link would
 
 ## [Unreleased]
 
+## 1.0.0 - 2026-10-01
+
 ### Added
 
 - [Visible] **Browser model access.** Squire Link accepts local requests from Squire and forwards them to configured Jev or Laya servers, adding API keys from the operating system keychain when needed.
